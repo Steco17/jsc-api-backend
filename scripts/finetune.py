@@ -169,7 +169,12 @@ def main():
         data_collator=DataCollatorForSeq2Seq(tok, model=model),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
-    trainer.train()
+
+    # Resume from the latest checkpoint under --out if one exists (e.g. a
+    # Colab session that disconnected mid-run) instead of starting over.
+    # save_steps/save_total_limit above already write these periodically.
+    has_checkpoint = any(Path(args.out).glob("checkpoint-*"))
+    trainer.train(resume_from_checkpoint=has_checkpoint or None)
 
     # ------------------------------------------------------------------
     # 6. Merge LoRA adapters into the base weights => a plain standalone
