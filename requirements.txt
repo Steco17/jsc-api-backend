@@ -1,0 +1,7 @@
+# Serving (CPU)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+ctranslate2>=4.0
+transformers>=4.40
+sentencepiece
+sacrebleu>=2.4

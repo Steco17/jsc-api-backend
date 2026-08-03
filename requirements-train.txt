@@ -1,0 +1,9 @@
+# Training (run on GPU, e.g. Google Colab)
+transformers>=4.40
+datasets>=2.19
+peft>=0.10
+accelerate>=0.29
+sentencepiece
+torch
+sacrebleu>=2.4
+ctranslate2>=4.0
