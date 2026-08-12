@@ -178,17 +178,15 @@ Watch for:
 
 The test set must contain genuinely unseen sentence pairs.
 
-The current preparation script creates reverse rows before randomly splitting the data.
+The preparation script now assigns complete source groups with a stable SHA-256 hash.
 
-One direction of a sentence pair can therefore appear in training while its reverse appears in testing.
+Every row sharing a Bible `verse_key`, including textual variants in other language files, receives the same split.
 
-This is data leakage and can produce unrealistically high scores.
+Reverse-direction rows retain that group identifier and cannot cross into another split.
 
-Fix this issue before trusting the evaluation results.
+Keep `group_id` available in evaluation artifacts so the train, development, and test group sets can be audited as disjoint.
 
-An original translation pair and its reverse must always remain in the same split.
-
-Near-duplicate sentences and translations from the same source document should also remain in the same split when possible.
+New data importers must provide a meaningful source-document group when near-duplicates or multiple translations share one underlying passage.
 
 See [TRAINING_GUIDE.md](TRAINING_GUIDE.md) for the complete data preparation and training workflow.
 

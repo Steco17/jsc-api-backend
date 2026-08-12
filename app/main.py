@@ -1,102 +1,199 @@
-"""Cameroon Languages Translation API - FastAPI service.
+"""FastAPI service for the Cameroon languages translation model.
 
-ARCHITECTURE
-------------
-- The fine-tuned model (see scripts/finetune.py) is converted to CTranslate2
-  int8 format, which is ~4x smaller and fast on plain CPUs - no GPU needed
-  in production.
-- The model and tokenizer are loaded ONCE at startup and kept in memory;
-  every request reuses them (loading per-request would take seconds).
-- /contribute implements the data-collection side of the project: users
-  submit new sentence pairs which are appended to data/contributed.jsonl
-  and, after human review, feed the next fine-tuning round.
-
-CONFIGURATION (environment variables)
--------------------------------------
-  MODEL_DIR      path to the CTranslate2 model      (default: model_ct2)
-  TOKENIZER_DIR  path to the HF tokenizer           (default: model_out/merged)
-  API_KEY        if set, requests must send header  X-API-Key: <key>
-  DATA_DIR       where contributed pairs are stored (default: data)
-
-RUN
----
-  uvicorn app.main:app --host 0.0.0.0 --port 8000
-  Interactive docs: http://localhost:8000/docs
+The converted CTranslate2 model is shared by all requests.  Translation
+directions are loaded from the model's ``training_manifest.json`` instead of
+being inferred from a language status flag.  This prevents an English-only
+fine-tune from accidentally advertising unsupported French or local-language
+pairs.
 """
+
 import json
 import os
+import secrets
 import threading
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-# ---------------------------------------------------------------------------
-# Configuration - read once at import time.
-# ---------------------------------------------------------------------------
-MODEL_DIR = os.getenv("MODEL_DIR", "model_ct2")
-TOKENIZER_DIR = os.getenv("TOKENIZER_DIR", "model_out/merged")
-API_KEY = os.getenv("API_KEY")            # None => auth disabled (dev mode)
+MODEL_DIR = Path(os.getenv("MODEL_DIR", "model_ct2"))
+TOKENIZER_DIR = Path(os.getenv("TOKENIZER_DIR", "model_out/merged"))
+API_KEY = os.getenv("API_KEY")
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 
-# Supported languages: loaded from data/languages.json, which tracks every
-# language this project targets. Only "pretrained" (native to NLLB-200) and
-# "fine_tuned" (already trained into the deployed model) entries are exposed
-# here - "data_ready" (cleaned data on hand, not trained yet) and "planned"
-# (no data yet) languages exist in the registry for the training pipeline to
-# reference but aren't usable until their status flips to "fine_tuned".
 LANGUAGES_FILE = Path(__file__).resolve().parent.parent / "data" / "languages.json"
-with open(LANGUAGES_FILE, encoding="utf-8") as _f:
-    _REGISTRY = json.load(_f)
-LANGUAGES = {code: info["name"] for code, info in _REGISTRY.items()
-             if info["status"] in ("pretrained", "fine_tuned")}
+with LANGUAGES_FILE.open(encoding="utf-8") as registry_handle:
+    REGISTRY = json.load(registry_handle)
 
-app = FastAPI(title="Cameroon Languages Translation API", version="0.1.0")
-
-# Globals populated at startup. Module-level so all requests share them.
-_translator = None       # ctranslate2.Translator instance
-_tokenizer = None        # HuggingFace tokenizer
-_write_lock = threading.Lock()   # serializes appends to contributed.jsonl
-                                 # (uvicorn may run multiple threads)
-
-
-def check_key(x_api_key: str | None = Header(default=None)):
-    """FastAPI dependency: reject the request if API_KEY is set and the
-    client did not send a matching X-API-Key header.
-
-    If the API_KEY env var is unset, auth is disabled (useful during
-    development) - set it before exposing the API publicly.
-    """
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(401, "Invalid or missing X-API-Key")
+# Translation dropdowns contain only languages already represented by the
+# deployed model.  Contribution forms use the complete registry below because
+# collecting data is most important before a language becomes deployable.
+ACTIVE_STATUSES = {"pretrained", "fine_tuned"}
+LANGUAGES = {
+    code: info["name"] for code, info in REGISTRY.items() if info["status"] in ACTIVE_STATUSES
+}
+CONTRIBUTION_LANGUAGES = {code: info["name"] for code, info in REGISTRY.items()}
+PRETRAINED_LANGUAGES = {code for code, info in REGISTRY.items() if info["status"] == "pretrained"}
+FINE_TUNED_LANGUAGES = {code for code, info in REGISTRY.items() if info["status"] == "fine_tuned"}
 
 
-@app.on_event("startup")
-def load_model():
-    """Load model + tokenizer once when the server starts.
+def base_directions() -> set[tuple[str, str]]:
+    """Return all ordered pairs native to the untouched NLLB base model."""
 
-    Imports are done here (not at module top) so the app module can be
-    imported for testing without the heavy ML dependencies installed.
-    """
-    global _translator, _tokenizer
+    return {
+        (source, target)
+        for source in PRETRAINED_LANGUAGES
+        for target in PRETRAINED_LANGUAGES
+        if source != target
+    }
+
+
+_translator = None
+_tokenizer = None
+_supported_directions = base_directions()
+
+# NLLB stores src_lang as mutable tokenizer state.  FastAPI executes normal
+# functions in a thread pool, so two requests can otherwise encode with each
+# other's source language.  Translation itself remains outside this lock.
+_tokenizer_lock = threading.Lock()
+_write_lock = threading.Lock()
+
+
+def _load_training_manifest(tokenizer_dir: Path) -> dict | None:
+    """Load and structurally validate a model's training manifest."""
+
+    path = tokenizer_dir / "training_manifest.json"
+    if not path.is_file():
+        return None
+    with path.open(encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError(f"Unsupported training manifest schema in {path}")
+    if not isinstance(manifest.get("trained_directions"), list):
+        raise RuntimeError(f"training manifest has no trained_directions: {path}")
+    return manifest
+
+
+def _validated_manifest_directions(manifest: dict) -> set[tuple[str, str]]:
+    """Convert manifest pairs to tuples and reject unknown registry codes."""
+
+    directions: set[tuple[str, str]] = set()
+    for entry in manifest["trained_directions"]:
+        if not isinstance(entry, list) or len(entry) != 2:
+            raise RuntimeError(f"Invalid trained direction in manifest: {entry!r}")
+        source, target = entry
+        unknown = {source, target} - REGISTRY.keys()
+        if unknown:
+            raise RuntimeError(f"Training manifest references unknown languages: {sorted(unknown)}")
+        if source != target:
+            directions.add((source, target))
+    return directions
+
+
+def load_model() -> None:
+    """Load model assets and verify registry, tokenizer, and manifest agreement."""
+
+    global _translator, _tokenizer, _supported_directions
+
+    if not MODEL_DIR.is_dir():
+        raise RuntimeError(
+            f"CTranslate2 model directory not found: {MODEL_DIR}. "
+            "Convert or mount the trained model before starting the API."
+        )
+    if not TOKENIZER_DIR.is_dir():
+        raise RuntimeError(
+            f"Tokenizer directory not found: {TOKENIZER_DIR}. "
+            "Mount model_out/merged before starting the API."
+        )
+
     import ctranslate2
     from transformers import AutoTokenizer
 
-    _translator = ctranslate2.Translator(MODEL_DIR, device="cpu",
-                                         compute_type="int8")
-    _tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR, local_files_only=True)
+    translator = ctranslate2.Translator(str(MODEL_DIR), device="cpu", compute_type="int8")
+    manifest = _load_training_manifest(TOKENIZER_DIR)
+
+    if FINE_TUNED_LANGUAGES and manifest is None:
+        raise RuntimeError(
+            "The language registry contains fine_tuned entries, but the model "
+            "has no training_manifest.json. Refusing to guess its capabilities."
+        )
+
+    directions = base_directions()
+    if manifest:
+        directions |= _validated_manifest_directions(manifest)
+
+        manifest_languages = set(manifest.get("languages", []))
+        missing_from_manifest = FINE_TUNED_LANGUAGES - manifest_languages
+        if missing_from_manifest:
+            raise RuntimeError(
+                "Fine-tuned registry languages missing from model manifest: "
+                f"{sorted(missing_from_manifest)}"
+            )
+
+    # A registry status can be changed by hand, but the tokenizer is the final
+    # proof that a language marker exists in the deployed model artifact.
+    for code in LANGUAGES:
+        if tokenizer.convert_tokens_to_ids(code) == tokenizer.unk_token_id:
+            raise RuntimeError(f"Tokenizer does not contain active language token {code}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _tokenizer = tokenizer
+    _translator = translator
+    _supported_directions = {
+        pair for pair in directions if pair[0] in LANGUAGES and pair[1] in LANGUAGES
+    }
 
 
-# ---------------------------------------------------------------------------
-# Request schemas (pydantic validates types and length limits for us).
-# ---------------------------------------------------------------------------
+def unload_model() -> None:
+    """Release runtime objects during application shutdown and tests."""
+
+    global _translator, _tokenizer
+    _translator = None
+    _tokenizer = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Bind heavyweight model loading to the ASGI application lifecycle."""
+
+    load_model()
+    try:
+        yield
+    finally:
+        unload_model()
+
+
+app = FastAPI(
+    title="Cameroon Languages Translation API",
+    version="0.2.0",
+    lifespan=lifespan,
+)
+
+
+def check_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Require X-API-Key when API_KEY is configured by the deployment."""
+
+    if API_KEY and (x_api_key is None or not secrets.compare_digest(x_api_key, API_KEY)):
+        raise HTTPException(401, "Invalid or missing X-API-Key")
+
+
 class TranslateRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000,
-                      description="Text to translate")
-    src_lang: str                       # e.g. "fra_Latn"
-    tgt_lang: str                       # e.g. "ewo_Latn"
+    text: str = Field(min_length=1, max_length=2000)
+    src_lang: str
+    tgt_lang: str
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        """Reject strings that satisfy min_length using whitespace only."""
+
+        value = value.strip()
+        if not value:
+            raise ValueError("text must not be blank")
+        return value
 
 
 class ContributeRequest(BaseModel):
@@ -104,87 +201,145 @@ class ContributeRequest(BaseModel):
     tgt: str = Field(min_length=1, max_length=2000)
     src_lang: str
     tgt_lang: str
-    contributor: str | None = None      # optional name/handle for credit
+    contributor: str | None = Field(default=None, max_length=100)
+
+    @field_validator("src", "tgt")
+    @classmethod
+    def pair_text_must_not_be_blank(cls, value: str) -> str:
+        """Normalize surrounding whitespace and reject empty contributions."""
+
+        value = value.strip()
+        if not value:
+            raise ValueError("translation text must not be blank")
+        return value
 
 
-def validate_langs(src_lang: str, tgt_lang: str):
-    """Shared validation: both codes must be supported and different."""
+def validate_known_languages(src_lang: str, tgt_lang: str, allowed: dict[str, str]) -> None:
+    """Validate two distinct language codes against a selected registry view."""
+
     for code in (src_lang, tgt_lang):
-        if code not in LANGUAGES:
-            raise HTTPException(422, f"Unknown language code '{code}'. "
-                                     f"Supported: {list(LANGUAGES)}")
+        if code not in allowed:
+            raise HTTPException(
+                422,
+                f"Unknown language code '{code}'. Supported: {sorted(allowed)}",
+            )
     if src_lang == tgt_lang:
         raise HTTPException(422, "src_lang and tgt_lang must differ")
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+def validate_translation_direction(src_lang: str, tgt_lang: str) -> None:
+    """Require a direction proven by base pretraining or the model manifest."""
+
+    validate_known_languages(src_lang, tgt_lang, LANGUAGES)
+    if (src_lang, tgt_lang) not in _supported_directions:
+        raise HTTPException(
+            422,
+            f"Translation direction {src_lang} -> {tgt_lang} is not enabled "
+            "for the deployed model.",
+        )
+
+
+def ensure_model_ready() -> None:
+    """Return a service-level error instead of an attribute error in edge cases."""
+
+    if _translator is None or _tokenizer is None:
+        raise HTTPException(503, "Translation model is not loaded")
+
+
 @app.get("/health")
 def health():
-    """Liveness probe for monitoring/load balancers."""
-    return {"status": "ok", "model_loaded": _translator is not None}
+    """Report process liveness and model readiness separately."""
+
+    loaded = _translator is not None and _tokenizer is not None
+    return {
+        "status": "ready" if loaded else "starting",
+        "model_loaded": loaded,
+        "enabled_directions": len(_supported_directions),
+    }
+
+
+@app.get("/ready")
+def ready():
+    """Provide a readiness probe that returns 503 until inference is possible."""
+
+    ensure_model_ready()
+    return {"status": "ready"}
 
 
 @app.get("/languages")
 def languages():
-    """List supported language codes and names (for client dropdowns)."""
+    """List languages enabled for translation by registry status."""
+
     return LANGUAGES
 
 
+@app.get("/contribution-languages")
+def contribution_languages():
+    """List every language accepted by the human-review data pipeline."""
+
+    return CONTRIBUTION_LANGUAGES
+
+
+@app.get("/directions")
+def directions():
+    """List exact source and target pairs enabled by the deployed model."""
+
+    return {
+        "directions": [
+            {"src_lang": source, "tgt_lang": target}
+            for source, target in sorted(_supported_directions)
+        ]
+    }
+
+
 @app.post("/translate", dependencies=[Depends(check_key)])
-def translate(req: TranslateRequest):
-    """Translate text between two supported languages.
+def translate(request: TranslateRequest):
+    """Translate one text using a manifest-approved language direction."""
 
-    Pipeline:
-      1. Tokenize the source text. Setting tokenizer.src_lang first makes
-         the tokenizer prepend the source-language token (NLLB convention).
-      2. translate_batch with target_prefix=[[tgt_lang]] forces the decoder
-         to begin with the target-language token - that is how the model
-         knows which language to produce.
-      3. Strip that language token from the output and decode back to text.
-    """
-    validate_langs(req.src_lang, req.tgt_lang)
+    ensure_model_ready()
+    validate_translation_direction(request.src_lang, request.tgt_lang)
 
-    _tokenizer.src_lang = req.src_lang
-    tokens = _tokenizer.convert_ids_to_tokens(_tokenizer.encode(req.text))
+    with _tokenizer_lock:
+        _tokenizer.src_lang = request.src_lang
+        tokens = _tokenizer.convert_ids_to_tokens(_tokenizer.encode(request.text))
 
     results = _translator.translate_batch(
         [tokens],
-        target_prefix=[[req.tgt_lang]],
-        beam_size=4,               # quality/speed trade-off (1 = greedy/fastest)
+        target_prefix=[[request.tgt_lang]],
+        beam_size=4,
         max_decoding_length=512,
     )
+    output_tokens = results[0].hypotheses[0]
+    if output_tokens and output_tokens[0] == request.tgt_lang:
+        output_tokens = output_tokens[1:]
 
-    out_tokens = results[0].hypotheses[0]
-    if out_tokens and out_tokens[0] == req.tgt_lang:
-        out_tokens = out_tokens[1:]        # drop the language marker token
+    with _tokenizer_lock:
+        translation = _tokenizer.decode(
+            _tokenizer.convert_tokens_to_ids(output_tokens),
+            skip_special_tokens=True,
+        )
 
-    text = _tokenizer.decode(
-        _tokenizer.convert_tokens_to_ids(out_tokens), skip_special_tokens=True)
-
-    return {"translation": text, "src_lang": req.src_lang,
-            "tgt_lang": req.tgt_lang}
+    return {
+        "translation": translation,
+        "src_lang": request.src_lang,
+        "tgt_lang": request.tgt_lang,
+    }
 
 
 @app.post("/contribute", dependencies=[Depends(check_key)])
-def contribute(req: ContributeRequest):
-    """Collect a new sentence pair from the community.
+def contribute(request: ContributeRequest):
+    """Append a reviewable sentence pair for any registered project language."""
 
-    Rows are appended to data/contributed.jsonl with a UTC timestamp.
-    They are NOT used automatically - review them (quality/spam) and merge
-    the good ones into the training data for the next fine-tuning round.
-    The lock prevents interleaved writes when multiple requests arrive
-    at the same time.
-    """
-    validate_langs(req.src_lang, req.tgt_lang)
+    validate_known_languages(request.src_lang, request.tgt_lang, CONTRIBUTION_LANGUAGES)
+    row = request.model_dump()
+    row["timestamp"] = datetime.now(UTC).isoformat()
 
-    row = req.model_dump()
-    row["timestamp"] = datetime.now(timezone.utc).isoformat()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    destination = DATA_DIR / "contributed.jsonl"
+    with _write_lock, destination.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    with _write_lock, open(DATA_DIR / "contributed.jsonl", "a",
-                           encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    return {"status": "saved", "message": "Merci / Thank you! Your pair will "
-            "be reviewed and used in the next training round."}
+    return {
+        "status": "saved",
+        "message": "Merci / Thank you! Your pair will be reviewed before training.",
+    }
