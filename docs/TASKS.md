@@ -2,6 +2,7 @@
 
 Work through these in order.
 Check off as you go.
+Use [LOCAL_TRAINING_GUIDE.md](LOCAL_TRAINING_GUIDE.md) for Windows commands and [TRAINING_EVALUATION_GUIDE.md](TRAINING_EVALUATION_GUIDE.md) for model approval.
 
 ## 0. Your Cameroonian-languages source data
 
@@ -18,16 +19,21 @@ Check off as you go.
 - [ ] Augment with public corpora: JW300/Bible (Ewondo, Fulfulde `fub_Latn`, and other Cameroonian languages; Duala out of scope for now), MAFAND-MT, masakhane.io datasets
 - [ ] FLORES-200 has no entries for this project's Fulfulde (`fub_Latn`, Adamawa) or any other Cameroonian language here - it's not usable as an extra test set for this project
 - [x] Build grouped, deterministic train/dev/test splits with reverse pairs retained in the same group
-- [ ] Verify counts: aim for ≥5-10k pairs per language (50k+ for good quality)
+- [ ] Verify counts: aim for at least 5,000 to 10,000 pairs per language, with 50,000 or more preferred for stronger quality
 - [ ] Spot-check 50 random pairs per language with a native speaker for alignment errors
 
-## 2. Training (Google Colab GPU)
+## 2. Training (local Windows GPU or Google Colab)
 
+- [x] Create a reproducible local setup with pinned dependencies and CUDA validation
+- [x] Run a direction-balanced BF16 smoke test across all 60 directions on the RTX 3050
+- [x] Confirm finite gradients, 2.79 GiB peak reserved VRAM, model merge, CTranslate2 conversion, and CPU inference
 - [x] Create a guarded Colab notebook with pinned dependencies, GPU validation, and a required smoke run
-- [ ] Upload `scripts/finetune.py` and `data/prepared/`
-- [ ] Run the corrected full fine-tune and watch development loss decrease; new language tokens are discovered automatically
-- [ ] Download `model_out/merged/` to your machine
-- [ ] Back up the weights (Git LFS or private Hugging Face repo)
+- [ ] Choose the first language-script target for a local pilot
+- [ ] Run 500 balanced examples per direction with `scripts/train_local.ps1 -Mode pilot`
+- [ ] Review `runtime_metrics.json` and development loss before starting the complete target corpus
+- [ ] Train every prepared row for the approved target and preserve the exact checkpoints and manifests
+- [ ] Use the Colab workflow instead when one model must cover all 30 targets
+- [ ] Back up the final candidate weights in durable private storage
 
 ## 3. Evaluation
 

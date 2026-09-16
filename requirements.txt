@@ -1,6 +1,9 @@
 # Serving dependencies are pinned so rebuilding the same commit does not pick
 # up a future breaking release.
 fastapi==0.139.2
+# Starlette 1.6 still imports an AnyIO alias that warns in AnyIO 4.12+.
+# Tests treat warnings as errors, so keep the last compatible AnyIO line.
+anyio==4.11.0
 uvicorn[standard]==0.51.0
 ctranslate2==4.8.1
 transformers==4.57.6

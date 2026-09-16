@@ -1,6 +1,6 @@
 # Cameroon Languages Translation API Roadmap
 
-Last updated: 2026-08-12
+Last updated: 2026-09-16
 
 The goal is a model-owned translation API for English and Cameroonian languages.
 French and other directions must remain unavailable unless the deployed model has training and evaluation evidence for them.
@@ -11,14 +11,16 @@ French and other directions must remain unavailable unless the deployed model ha
 | --- | --- | --- |
 | Engineering foundation | Complete | Data preparation, training safeguards, API validation, concurrency protection, and regression tests are implemented. |
 | Prepared corpus | Complete | The corrected grouped, bidirectional corpus has been regenerated and audited. |
-| Local automated verification | Complete | All 19 tests pass with warnings treated as errors, and lint and compilation checks pass. |
-| Colab GPU smoke training | Next | Run the notebook on a T4-class GPU and record memory and trainable-parameter metrics. |
+| Local automated verification | Complete | All 28 tests pass with warnings treated as errors, and lint and compilation checks pass. |
+| Local RTX 3050 smoke training | Complete | BF16 training, all 60 directions, finite gradients, 2.79 GiB peak reserved VRAM, CTranslate2 conversion, and CPU inference passed. |
+| Local one-target pilot | Next | Select one language-script target and run 500 balanced examples per direction. |
+| Colab all-target path | Available | The guarded notebook is implemented but has not yet been executed on a T4-class GPU. |
 | Full model training | Pending | Complete the first controlled one-epoch run and preserve all artifacts. |
 | Model evaluation | Pending | Compare every trained direction with base NLLB and complete native-speaker review. |
 | Deployment candidate | Pending | Requires evaluation approval, CTranslate2 conversion, and real-model HTTP testing. |
 | Production release | Pending | Requires performance, security, storage, monitoring, and licensing gates. |
 
-The release is currently blocked by GPU training and model-quality evidence, not by the prepared-data pipeline.
+The release is currently blocked by candidate training and model-quality evidence, not by the prepared-data pipeline or local GPU compatibility.
 Docker image validation is also pending because a Docker daemon was not available in the local verification environment.
 
 ## Verified corpus baseline
@@ -45,7 +47,8 @@ Docker image validation is also pending because a Docker daemon was not availabl
 - [x] Represent Latin and Arabic Fulfulde with separate language-script tokens.
 - [x] Fine-tune with LoRA while training only newly added language-token rows.
 - [x] Detect unknown language tokens automatically before training.
-- [x] Validate repository access, dependencies, CUDA memory, data integrity, and smoke training in Colab.
+- [x] Implement guarded Colab checks for repository access, dependencies, CUDA memory, data integrity, and smoke training.
+- [x] Validate pinned dependencies, CUDA execution, finite gradients, memory headroom, model merging, conversion, and inference on the local RTX 3050.
 - [x] Reject incompatible checkpoint resumes and ignore incomplete checkpoint directories.
 - [x] Record exact trained directions, configuration, and artifacts in manifests.
 - [x] Validate the registry, tokenizer, and training manifest together during API startup.
@@ -66,16 +69,21 @@ Docker image validation is also pending because a Docker daemon was not availabl
 
 Exit gate: every enabled language-script target has documented provenance and a representative native-speaker quality sample.
 
-## Phase 2: First controlled GPU training run
+## Phase 2: First controlled candidate training run
 
-- [ ] Open `notebooks/train_colab.ipynb` in Colab with a T4-class GPU and run all cells from a clean runtime.
-- [ ] Complete the two-step smoke training before starting the full run.
-- [ ] Record trainable parameter count, trainable percentage, peak GPU memory, and smoke loss.
-- [ ] Start the first full run with one epoch, batch size 4, and gradient accumulation 16.
+- [x] Rebuild the local Windows environment with the pinned CUDA and Python dependency set.
+- [x] Complete a direction-balanced two-step smoke run across all 60 directions.
+- [x] Record trainable parameters, precision, finite gradients, peak GPU memory, and smoke loss.
+- [x] Convert the smoke artifact to CTranslate2 int8 and run CPU inference in every direction.
+- [ ] Select the first language-script target for candidate development.
+- [ ] Run a balanced local pilot with 500 examples per direction.
+- [ ] Review pilot training loss, development loss, finite-gradient count, runtime, and peak memory.
+- [ ] Start a one-epoch run over every prepared row for the approved target.
+- [ ] Use the guarded Colab notebook instead if the first candidate must cover all 30 targets.
 - [ ] Monitor training and development loss at every evaluation interval.
 - [ ] Resume interrupted work only when the saved run fingerprint matches the current configuration and data.
-- [ ] Preserve the final merged model, tokenizer, checkpoints, run configuration, training manifest, and dataset manifest together.
-- [ ] Save the complete Colab log and the exact source revision used for the run.
+- [ ] Preserve the final merged model, tokenizer, checkpoints, run configuration, runtime metrics, training manifest, and dataset manifest together.
+- [ ] Save the complete training log and the exact source revision used for the run.
 
 Exit gate: a reproducible merged model exists, its manifests match the prepared corpus, and the training run completes without memory or numerical failures.
 
@@ -141,4 +149,5 @@ A commercial deployment requires a compatible base model or separate permission 
 
 ## Immediate next action
 
-Run the complete Colab notebook on a T4-class GPU, capture the smoke metrics, and continue to the one-epoch run only if the smoke gate passes.
+Select the first language-script target, run a 500-example-per-direction local pilot, and review `runtime_metrics.json` plus development loss.
+Use the guarded Colab notebook instead when the goal is one training run across all 30 targets.

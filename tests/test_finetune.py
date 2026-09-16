@@ -86,6 +86,52 @@ def test_dataset_metadata_reports_observed_directions() -> None:
     ]
 
 
+def test_auto_precision_prefers_bf16_when_supported(monkeypatch) -> None:
+    monkeypatch.setattr(finetune.torch.cuda, "is_bf16_supported", lambda: True)
+
+    assert finetune.resolve_precision("auto") == "bf16"
+
+
+def test_requested_bf16_rejects_an_unsupported_gpu(monkeypatch) -> None:
+    monkeypatch.setattr(finetune.torch.cuda, "is_bf16_supported", lambda: False)
+
+    with pytest.raises(RuntimeError, match="does not support"):
+        finetune.resolve_precision("bf16")
+
+
+def test_target_language_filter_keeps_only_involving_pairs() -> None:
+    rows = {
+        "src": ["one", "two", "three", "four"],
+        "tgt": ["un", "deux", "trois", "quatre"],
+        "src_lang": ["eng_Latn", "ewo_Latn", "eng_Latn", "fra_Latn"],
+        "tgt_lang": ["ewo_Latn", "eng_Latn", "fra_Latn", "eng_Latn"],
+    }
+    dataset = DatasetDict(train=Dataset.from_dict(rows), dev=Dataset.from_dict(rows))
+
+    filtered = finetune.filter_target_languages(dataset, ["ewo_Latn"])
+    languages, directions = finetune.dataset_metadata(filtered)
+
+    assert len(filtered["train"]) == 2
+    assert languages == ["eng_Latn", "ewo_Latn"]
+    assert directions == [
+        ["eng_Latn", "ewo_Latn"],
+        ["ewo_Latn", "eng_Latn"],
+    ]
+
+
+def test_target_language_filter_rejects_an_absent_language() -> None:
+    rows = {
+        "src": ["one"],
+        "tgt": ["un"],
+        "src_lang": ["eng_Latn"],
+        "tgt_lang": ["fra_Latn"],
+    }
+    dataset = DatasetDict(train=Dataset.from_dict(rows), dev=Dataset.from_dict(rows))
+
+    with pytest.raises(ValueError, match="absent from the training data"):
+        finetune.filter_target_languages(dataset, ["ewo_Latn"])
+
+
 def test_checkpoint_resume_ignores_incomplete_latest_directory(tmp_path) -> None:
     run_config = {"fingerprint": "same"}
     (tmp_path / "run_config.json").write_text(json.dumps(run_config), encoding="utf-8")
@@ -135,12 +181,16 @@ def test_run_fingerprint_survives_regenerated_file_timestamps(tmp_path) -> None:
         dev=str(dev),
         lr=1e-4,
         batch=4,
+        eval_batch=4,
         grad_accum=16,
+        precision="bf16",
         epochs=4,
         max_steps=-1,
         eval_steps=500,
         max_train_samples=0,
         max_dev_samples=0,
+        target_langs=["ewo_Latn"],
+        max_length=128,
         seed=42,
     )
     first = finetune.build_run_config(args, ["eng_Latn"], [])
@@ -150,6 +200,9 @@ def test_run_fingerprint_survives_regenerated_file_timestamps(tmp_path) -> None:
     second = finetune.build_run_config(args, ["eng_Latn"], [])
 
     assert first["fingerprint"] == second["fingerprint"]
+    assert first["target_languages"] == ["ewo_Latn"]
+    assert first["max_length"] == 128
+    assert first["precision"] == "bf16"
 
     train.write_text("new! bytes\n", encoding="utf-8")
     third = finetune.build_run_config(args, ["eng_Latn"], [])
@@ -171,12 +224,16 @@ def test_run_config_rejects_a_stale_dataset_manifest(tmp_path) -> None:
         dev=str(dev),
         lr=1e-4,
         batch=4,
+        eval_batch=4,
         grad_accum=16,
+        precision="fp16",
         epochs=4,
         max_steps=-1,
         eval_steps=500,
         max_train_samples=0,
         max_dev_samples=0,
+        target_langs=[],
+        max_length=256,
         seed=42,
     )
 

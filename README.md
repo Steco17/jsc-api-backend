@@ -91,6 +91,30 @@ data/prepared/dataset_manifest.json
 Each JSONL row contains `src`, `tgt`, `src_lang`, `tgt_lang`, and `group_id`.
 The manifest records row counts, target languages, grouping policy, observed training directions, and SHA-256 checksums for every split.
 
+## Train on a Windows PC
+
+Local training is verified on an NVIDIA GeForce RTX 3050 Laptop GPU with 4 GiB of VRAM.
+Create the pinned CUDA environment and run the required smoke gate:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_local.ps1 -Rebuild
+.\scripts\train_local.ps1 -Mode smoke
+```
+
+Then run a direction-balanced pilot for one target:
+
+```powershell
+.\scripts\train_local.ps1 `
+  -Mode pilot `
+  -TargetLanguage ewo_Latn `
+  -SamplesPerDirection 500
+```
+
+The setup requires Python 3.11 or 3.12, `uv`, a recent NVIDIA driver, and PowerShell.
+The execution-policy change applies only to the current PowerShell window.
+See [Local Windows Training Guide](docs/LOCAL_TRAINING_GUIDE.md) for modes, measured VRAM, checkpoint recovery, full-corpus training, conversion, and evaluation.
+
 ## Run training in Google Colab
 
 Open `notebooks/train_colab.ipynb` with its Colab badge.

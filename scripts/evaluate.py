@@ -40,7 +40,10 @@ def main():
     import ctranslate2
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(args.tokenizer)
+    tok = AutoTokenizer.from_pretrained(
+        args.tokenizer,
+        fix_mistral_regex=False,
+    )
     translator = ctranslate2.Translator(args.ct2, device="cpu",
                                         compute_type="int8")
 

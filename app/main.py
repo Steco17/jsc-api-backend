@@ -111,7 +111,11 @@ def load_model() -> None:
     import ctranslate2
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        TOKENIZER_DIR,
+        local_files_only=True,
+        fix_mistral_regex=False,
+    )
     translator = ctranslate2.Translator(str(MODEL_DIR), device="cpu", compute_type="int8")
     manifest = _load_training_manifest(TOKENIZER_DIR)
 

@@ -3,6 +3,7 @@
 Successful training cannot be determined from training loss alone.
 
 Use validation loss, test metrics, comparison with the original model, and human evaluation together.
+Smoke and pilot runs are engineering gates, not deployable model-quality evidence.
 
 ## 1. Check validation loss
 
@@ -21,6 +22,10 @@ Validation loss: 3.3 -> 2.6 -> 2.2
 ```
 
 This indicates that the model is learning patterns that also work on data excluded from training.
+
+Also inspect `runtime_metrics.json` in the run directory.
+`finite_gradient_steps` must be greater than zero, and every recorded loss must be finite.
+The training script refuses to merge a model when every logged gradient norm is non-finite.
 
 ### Warning signs
 
@@ -62,8 +67,8 @@ The script reports BLEU and chrF++ for every translation direction.
 Example output:
 
 ```text
-fra_Latn -> ewo_Latn (250 rows): BLEU 22.4 | chrF++ 43.8
-ewo_Latn -> fra_Latn (250 rows): BLEU 27.1 | chrF++ 49.2
+eng_Latn -> ewo_Latn (250 rows): BLEU 22.4 | chrF++ 43.8
+ewo_Latn -> eng_Latn (250 rows): BLEU 27.1 | chrF++ 49.2
 ```
 
 Use chrF++ as the primary automatic metric for these low-resource languages.
@@ -89,10 +94,10 @@ Quality is not normally equal in both directions.
 Review every direction that the API will expose:
 
 ```text
-fra_Latn -> ewo_Latn
-ewo_Latn -> fra_Latn
-eng_Latn -> dua_Latn
-dua_Latn -> eng_Latn
+eng_Latn -> ewo_Latn
+ewo_Latn -> eng_Latn
+eng_Latn -> fub_Arab
+fub_Arab -> eng_Latn
 ```
 
 Do not approve a language pair only because the average score across all directions is acceptable.
@@ -189,11 +194,13 @@ Keep `group_id` available in evaluation artifacts so the train, development, and
 New data importers must provide a meaningful source-document group when near-duplicates or multiple translations share one underlying passage.
 
 See [TRAINING_GUIDE.md](TRAINING_GUIDE.md) for the complete data preparation and training workflow.
+See [LOCAL_TRAINING_GUIDE.md](LOCAL_TRAINING_GUIDE.md) for the verified Windows GPU runbook.
 
 ## 8. Suggested acceptance criteria
 
 Consider a translation direction ready for limited testing when:
 
+- The full candidate run recorded finite gradients and finite losses.
 - Validation loss improved without later increasing substantially.
 - The final model outperformed the original NLLB model on a clean test set.
 - The test set contains no training data or reversed-pair leakage.

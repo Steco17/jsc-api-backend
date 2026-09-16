@@ -61,6 +61,16 @@ def dataset_metadata(dataset: DatasetDict) -> tuple[list[str], list[list[str]]]:
     return languages, [list(pair) for pair in sorted(directions)]
 
 
+def resolve_precision(requested: str) -> str:
+    """Choose BF16 when the GPU supports its wider numeric range."""
+
+    if requested == "auto":
+        return "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+    if requested == "bf16" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("BF16 was requested, but this CUDA GPU does not support it")
+    return requested
+
+
 def build_run_config(args, languages: list[str], directions: list[list[str]]) -> dict:
     """Create the compatibility record used to validate checkpoint resumes."""
 
@@ -98,11 +108,14 @@ def build_run_config(args, languages: list[str], directions: list[list[str]]) ->
         "base_model": BASE,
         "languages": languages,
         "trained_directions": directions,
+        "target_languages": sorted(args.target_langs),
         "dataset_files": dataset_files,
-        "max_length": MAX_LEN,
+        "max_length": args.max_length,
         "learning_rate": args.lr,
         "batch": args.batch,
+        "eval_batch": args.eval_batch,
         "gradient_accumulation": args.grad_accum,
+        "precision": args.precision,
         "epochs": args.epochs,
         "max_steps": args.max_steps,
         "eval_steps": args.eval_steps,
@@ -185,7 +198,7 @@ def add_unknown_language_tokens(tokenizer, model, languages: list[str]) -> list[
     return token_ids
 
 
-def tokenize_dataset(dataset: DatasetDict, tokenizer) -> DatasetDict:
+def tokenize_dataset(dataset: DatasetDict, tokenizer, max_length: int) -> DatasetDict:
     """Tokenize mixed language pairs efficiently and without state leakage."""
 
     def preprocess_batch(batch: dict) -> dict:
@@ -207,7 +220,7 @@ def tokenize_dataset(dataset: DatasetDict, tokenizer) -> DatasetDict:
                 sources,
                 text_target=targets,
                 truncation=True,
-                max_length=MAX_LEN,
+                max_length=max_length,
             )
             for offset, original_index in enumerate(indices):
                 encoded_rows[original_index] = {
@@ -226,6 +239,31 @@ def tokenize_dataset(dataset: DatasetDict, tokenizer) -> DatasetDict:
         remove_columns=dataset["train"].column_names,
         desc="Tokenizing multilingual translation pairs",
     )
+
+
+def filter_target_languages(
+    dataset: DatasetDict,
+    target_languages: list[str],
+) -> DatasetDict:
+    """Keep pairs involving selected languages and reject unknown selections."""
+
+    if not target_languages:
+        return dataset
+
+    requested = set(target_languages)
+    available = set(dataset["train"]["src_lang"]) | set(dataset["train"]["tgt_lang"])
+    missing = requested - available
+    if missing:
+        raise ValueError(f"target languages are absent from the training data: {sorted(missing)}")
+
+    filtered = dataset.filter(
+        lambda row: row["src_lang"] in requested or row["tgt_lang"] in requested,
+        desc=f"Selecting pairs for {', '.join(sorted(requested))}",
+    )
+    for split in ("train", "dev"):
+        if len(filtered[split]) == 0:
+            raise ValueError(f"target-language selection left the '{split}' split empty")
+    return filtered
 
 
 def maybe_limit_samples(dataset: DatasetDict, train_limit: int, dev_limit: int):
@@ -257,21 +295,70 @@ def main() -> None:
     )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument(
+        "--eval-batch",
+        type=int,
+        default=0,
+        help="evaluation batch size; zero reuses --batch",
+    )
     parser.add_argument("--grad-accum", type=int, default=16)
     parser.add_argument("--eval-steps", type=int, default=500)
+    parser.add_argument(
+        "--empty-cache-steps",
+        type=int,
+        default=0,
+        help="release unused CUDA cache every N optimizer steps; zero disables it",
+    )
+    parser.add_argument("--dataloader-workers", type=int, default=0)
+    parser.add_argument(
+        "--precision",
+        choices=("auto", "bf16", "fp16"),
+        default="auto",
+        help="auto prefers BF16 on supported GPUs and otherwise uses FP16",
+    )
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--max-train-samples", type=int, default=0)
     parser.add_argument("--max-dev-samples", type=int, default=0)
+    parser.add_argument(
+        "--target-langs",
+        nargs="+",
+        default=[],
+        help="train only pairs involving these language codes",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=MAX_LEN,
+        help="maximum source and target token length; 128 reduces local GPU memory",
+    )
     parser.add_argument("--resume", choices=("auto", "never"), default="auto")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU not found. Use a Colab T4 or another CUDA training host.")
-    if min(args.batch, args.grad_accum, args.eval_steps) < 1:
-        parser.error("batch, grad-accum, and eval-steps must be positive")
+    args.eval_batch = args.eval_batch or args.batch
+    if min(args.batch, args.eval_batch, args.grad_accum, args.eval_steps) < 1:
+        parser.error("batch, eval-batch, grad-accum, and eval-steps must be positive")
+    if args.max_length < 1:
+        parser.error("max-length must be positive")
+    if min(args.max_train_samples, args.max_dev_samples) < 0:
+        parser.error("sample limits cannot be negative")
+    if args.empty_cache_steps < 0 or args.dataloader_workers < 0:
+        parser.error("empty-cache-steps and dataloader-workers cannot be negative")
+
+    gpu = torch.cuda.get_device_properties(0)
+    args.precision = resolve_precision(args.precision)
+    print(f"GPU: {gpu.name} ({gpu.total_memory / 1024**3:.1f} GiB)")
+    print(f"Training precision: {args.precision.upper()}")
+    print(
+        f"Physical batch: {args.batch}; gradient accumulation: {args.grad_accum}; "
+        f"effective batch: {args.batch * args.grad_accum}"
+    )
 
     dataset = load_dataset("json", data_files={"train": args.train, "dev": args.dev})
+    dataset = filter_target_languages(dataset, args.target_langs)
+    dataset = maybe_limit_samples(dataset, args.max_train_samples, args.max_dev_samples)
     languages, directions = dataset_metadata(dataset)
     languages = sorted(set(languages) | set(args.new_langs))
     run_config = build_run_config(args, languages, directions)
@@ -284,10 +371,13 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE)
+    # NLLB uses SentencePiece, so the optional Mistral regex migration does
+    # not apply. Saving this explicit choice also keeps local reloads quiet.
+    tokenizer = AutoTokenizer.from_pretrained(BASE, fix_mistral_regex=False)
+    model_dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
     model = AutoModelForSeq2SeqLM.from_pretrained(
         BASE,
-        torch_dtype=torch.float16,
+        dtype=model_dtype,
         low_cpu_mem_usage=True,
     )
     new_token_ids = add_unknown_language_tokens(tokenizer, model, languages)
@@ -314,8 +404,7 @@ def main() -> None:
             "Expected selective token training plus LoRA to stay below 10%."
         )
 
-    dataset = maybe_limit_samples(dataset, args.max_train_samples, args.max_dev_samples)
-    tokenized = tokenize_dataset(dataset, tokenizer)
+    tokenized = tokenize_dataset(dataset, tokenizer, args.max_length)
 
     updates_per_epoch = math.ceil(len(tokenized["train"]) / (args.batch * args.grad_accum))
     planned_steps = (
@@ -326,15 +415,17 @@ def main() -> None:
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(out_dir),
         per_device_train_batch_size=args.batch,
-        per_device_eval_batch_size=args.batch,
+        per_device_eval_batch_size=args.eval_batch,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,
         warmup_ratio=0.03,
-        fp16=True,
+        fp16=args.precision == "fp16",
+        bf16=args.precision == "bf16",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
+        torch_empty_cache_steps=args.empty_cache_steps or None,
         eval_strategy="steps",
         eval_steps=effective_eval_steps,
         save_strategy="steps",
@@ -347,6 +438,7 @@ def main() -> None:
         report_to="none",
         seed=args.seed,
         data_seed=args.seed,
+        dataloader_num_workers=args.dataloader_workers,
         save_safetensors=True,
     )
 
@@ -358,13 +450,47 @@ def main() -> None:
         data_collator=DataCollatorForSeq2Seq(tokenizer, model=model),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
-    trainer.train(resume_from_checkpoint=resume_checkpoint)
+    torch.cuda.reset_peak_memory_stats()
+    train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
+    torch.cuda.synchronize()
+    peak_allocated = torch.cuda.max_memory_allocated()
+    peak_reserved = torch.cuda.max_memory_reserved()
+    gradient_norms = [
+        float(entry["grad_norm"])
+        for entry in trainer.state.log_history
+        if "grad_norm" in entry
+    ]
+    finite_gradient_steps = sum(math.isfinite(norm) for norm in gradient_norms)
+    print(f"Peak GPU memory allocated: {peak_allocated / 1024**3:.2f} GiB")
+    print(f"Peak GPU memory reserved: {peak_reserved / 1024**3:.2f} GiB")
+
+    runtime_metrics = {
+        "schema_version": 1,
+        "gpu": gpu.name,
+        "gpu_total_memory_bytes": gpu.total_memory,
+        "precision": args.precision,
+        "peak_gpu_memory_allocated_bytes": peak_allocated,
+        "peak_gpu_memory_reserved_bytes": peak_reserved,
+        "gradient_norms": gradient_norms,
+        "finite_gradient_steps": finite_gradient_steps,
+        "train_metrics": train_result.metrics,
+    }
+    (out_dir / "runtime_metrics.json").write_text(
+        json.dumps(runtime_metrics, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if gradient_norms and finite_gradient_steps == 0:
+        raise RuntimeError(
+            "Every logged gradient norm was non-finite, so optimizer updates may have been "
+            "skipped. Use --precision bf16 on a supported GPU or lower the learning rate."
+        )
 
     merged = model.merge_and_unload()
     merged.config.use_cache = True
     merged_dir = out_dir / "merged"
     merged.save_pretrained(merged_dir, safe_serialization=True)
     tokenizer.save_pretrained(merged_dir)
+    shutil.copy2(out_dir / "runtime_metrics.json", merged_dir / "runtime_metrics.json")
 
     manifest = {
         "schema_version": 1,

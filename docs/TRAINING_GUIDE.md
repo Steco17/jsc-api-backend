@@ -1,6 +1,6 @@
 # Training Guide
 
-This guide explains the corrected data preparation, Colab training, evaluation, and deployment workflow.
+This guide explains the corrected data preparation, local or Colab training, evaluation, and deployment workflow.
 
 ## 1. Input formats
 
@@ -102,16 +102,20 @@ Large row counts cannot compensate for systematic alignment or labeling errors.
 
 ## 6. Reproducible dependencies
 
-Install:
+For Windows GPU training, use the tested setup entry point:
 
 ```powershell
-pip install -r requirements-train.txt
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_local.ps1 -Rebuild
 ```
 
 Transformers, Datasets, PEFT, Accelerate, SentencePiece, SacreBLEU, and CTranslate2 are pinned.
-PyTorch remains in a bounded major-version range because Colab supplies a CUDA-specific build.
+AnyIO and PyArrow are also pinned because newer releases broke the tested FastAPI and Datasets compatibility set.
+The local setup installs the official CUDA 12.8 build of PyTorch before installing project requirements.
+See [LOCAL_TRAINING_GUIDE.md](LOCAL_TRAINING_GUIDE.md) for prerequisites and recovery steps.
 
 The Colab notebook removes the unused preinstalled `torchao` package before importing PEFT.
+PyTorch remains in a bounded major-version range in `requirements-train.txt` because Colab supplies its own CUDA-specific build.
 This prevents the optional quantization backend from breaking normal LoRA initialization.
 
 ## 7. New language tokens and LoRA
@@ -128,7 +132,11 @@ This retains the intended parameter-efficient behavior and avoids optimizer stat
 
 ## 8. GPU memory controls
 
-The recommended T4 settings are:
+The verified 4 GiB Windows profile uses batch size 1, evaluation batch size 1, a 128-token limit, periodic CUDA cache cleanup, and no data-loader worker processes.
+It automatically selects BF16 on supported GPUs to prevent the FP16 gradient overflow observed during the first RTX 3050 smoke run.
+Use `scripts/train_local.ps1` instead of reproducing these flags manually.
+
+The recommended T4 settings remain:
 
 ```powershell
 python scripts/finetune.py `
@@ -150,24 +158,18 @@ Extend training only after development and test evidence shows that another pass
 
 ## 9. Required smoke run
 
-Before the full run, exercise the complete lifecycle with a small deterministic subset:
+Before a local pilot or full run, execute:
 
 ```powershell
-python scripts/finetune.py `
-  --train data/prepared/train.jsonl `
-  --dev data/prepared/dev.jsonl `
-  --out model_smoke `
-  --epochs 1 `
-  --batch 2 `
-  --grad-accum 1 `
-  --eval-steps 1 `
-  --max-steps 2 `
-  --max-train-samples 256 `
-  --max-dev-samples 64 `
-  --resume never
+.\scripts\train_local.ps1 -Mode smoke
 ```
 
-This detects dependency, tokenizer, LoRA, CUDA, evaluation, checkpoint, merge, and manifest failures before the expensive run.
+The sampler selects two training and one development example independently for every direction.
+The resulting smoke set covers all 60 directions and all 30 new language tokens instead of taking a prefix from the first corpus.
+The smoke gate checks dependency loading, tokenizer extension, LoRA, CUDA, evaluation, checkpointing, finite gradients, merge, and manifest creation.
+Successful smoke artifacts are removed automatically.
+
+The Colab notebook performs its own guarded smoke run before starting full training.
 
 ## 10. Safe checkpoint resume
 
@@ -175,7 +177,7 @@ This detects dependency, tokenizer, LoRA, CUDA, evaluation, checkpoint, merge, a
 Automatic resume is accepted only when the fingerprint matches.
 
 A checkpoint directory without `trainer_state.json` is treated as an interrupted write and ignored.
-Changing languages, data sizes, directions, base model, batch, accumulation, or learning rate requires a new output directory.
+Changing languages, data sizes, directions, precision, maximum sequence length, batch, accumulation, or learning rate requires a new output directory.
 
 This prevents an old Drive checkpoint from being silently reused for a different experiment.
 
@@ -190,10 +192,12 @@ model_out/merged/
   tokenizer files
   training_manifest.json
   dataset_manifest.json
+  runtime_metrics.json
 ```
 
 `training_manifest.json` records the model base, all dataset languages, observed directions, new token IDs, and run fingerprint.
-The API uses this file as deployment capability evidence.
+`runtime_metrics.json` records the GPU, precision, peak allocated and reserved memory, gradient norms, and Trainer metrics.
+The API uses `training_manifest.json` as deployment capability evidence.
 
 ## 12. Evaluation and deployment
 
@@ -220,7 +224,13 @@ Do not expose a language merely because training completed.
 Compare each direction with the base model and obtain native-speaker ratings on unseen sentences.
 After approval, update that language to `fine_tuned` in `data/languages.json` and redeploy the matching model, tokenizer, and manifest together.
 
-## 13. Colab-specific workflow
+## 13. Local Windows workflow
+
+Use [LOCAL_TRAINING_GUIDE.md](LOCAL_TRAINING_GUIDE.md) as the local runbook.
+The recommended progression is smoke, one-target pilot, complete selected target, conversion, automatic evaluation, and native-speaker evaluation.
+Do not start the 3.38-million-row all-target run on a 4 GiB laptop unless a months-long run is acceptable.
+
+## 14. Colab-specific workflow
 
 Use `notebooks/train_colab.ipynb` only in Google Colab.
 The notebook validates Colab, repository access, pinned versions, GPU memory, prepared group integrity, and smoke training before the full run.
