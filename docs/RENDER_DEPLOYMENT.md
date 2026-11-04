@@ -7,7 +7,7 @@ It is intended for application testing while translation model training is incom
 
 | Service | GitHub repository | Branch | Render health check |
 |---|---|---|---|
-| `jsc-translator-web-dev` | `SuhValentine/app-jsc-translator-fe` | `dev` | `/healthz` |
+| `jsc-translator-web-dev` | `Steco17/app-jsc-translator-fe` | `dev` | `/healthz` |
 | `jsc-translator-api-dev` | `Steco17/jsc-api-backend` | `dev` | `/ready` |
 
 Both services use Render's Frankfurt region and free development plan.

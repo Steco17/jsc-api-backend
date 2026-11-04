@@ -39,7 +39,7 @@ services:
   - type: web
     runtime: docker
     name: jsc-translator-web-dev
-    repo: https://github.com/SuhValentine/app-jsc-translator-fe.git
+    repo: https://github.com/Steco17/app-jsc-translator-fe.git
     branch: dev
     region: frankfurt
     plan: free
