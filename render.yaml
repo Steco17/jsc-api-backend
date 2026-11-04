@@ -48,8 +48,8 @@ services:
     autoDeployTrigger: checksPass
     healthCheckPath: /healthz
     envVars:
-      - key: BACKEND_HOSTPORT
+      - key: BACKEND_URL
         fromService:
           type: web
           name: jsc-translator-api-dev
-          property: hostport
+          envVarKey: RENDER_EXTERNAL_URL

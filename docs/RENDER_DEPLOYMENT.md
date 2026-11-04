@@ -14,7 +14,8 @@ Both services use Render's Frankfurt region and free development plan.
 Each service deploys only after the GitHub CI check for its commit passes.
 
 The frontend sends browser requests to its own `/api` path.
-Nginx forwards those requests to the backend through Render's private network by using the Blueprint-provided `BACKEND_HOSTPORT` value.
+Nginx forwards those requests to the backend's Render HTTPS URL by using the Blueprint-provided `BACKEND_URL` value.
+This public service-to-service route is required because free Render web services cannot receive private-network traffic.
 
 ## Create the development environment
 
