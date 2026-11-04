@@ -1,0 +1,55 @@
+services:
+  - type: web
+    runtime: docker
+    name: jsc-translator-api-dev
+    repo: https://github.com/Steco17/jsc-api-backend.git
+    branch: dev
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: checksPass
+    healthCheckPath: /ready
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: TRANSLATION_MODE
+        value: placeholder
+      - key: ALLOWED_HOSTS
+        value: jsc-translator-api-dev,jsc-translator-api-dev.onrender.com
+      - key: ENABLE_API_DOCS
+        value: "true"
+      - key: EXPOSE_HEALTH_DETAILS
+        value: "true"
+      - key: STORE_CONTRIBUTOR_NAMES
+        value: "false"
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: ADMIN_FIRST_NAME
+        value: Render
+      - key: ADMIN_LAST_NAME
+        value: Development
+      - key: ADMIN_JOB_TITLE
+        value: Development Administrator
+      - key: ADMIN_ORGANIZATION
+        value: JSC Foundation for Learning
+
+  - type: web
+    runtime: docker
+    name: jsc-translator-web-dev
+    repo: https://github.com/SuhValentine/app-jsc-translator-fe.git
+    branch: dev
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: checksPass
+    healthCheckPath: /healthz
+    envVars:
+      - key: BACKEND_HOSTPORT
+        fromService:
+          type: web
+          name: jsc-translator-api-dev
+          property: hostport

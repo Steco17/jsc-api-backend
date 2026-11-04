@@ -1,0 +1,115 @@
+name: jsc-translator
+
+services:
+  backend:
+    image: jsc-translator-backend:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SETTINGS_FILE: /run/secrets/backend_env
+      DATA_DIR: /srv/data
+      DATABASE_PATH: /srv/data/jsc.sqlite3
+      LANGUAGES_FILE: /srv/config/languages.json
+    secrets:
+      - backend_env
+    volumes:
+      - jsc-data:/srv/data
+    ports:
+      - "${JSC_BIND_ADDRESS:-127.0.0.1}:${JSC_BACKEND_PORT:-8001}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    pids_limit: 256
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    image: jsc-translator-frontend:local
+    build:
+      context: ../app-jsc-translator-fe
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${JSC_BIND_ADDRESS:-127.0.0.1}:${JSC_FRONTEND_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    pids_limit: 128
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --output-document=/dev/null
+        - http://127.0.0.1:8080/healthz
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  ready:
+    image: jsc-translator-frontend:local
+    pull_policy: never
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        printf '\nJSC application is ready\n'
+        printf 'Frontend: http://localhost:%s\n' "$${JSC_FRONTEND_PORT}"
+        printf 'Backend API: http://localhost:%s\n' "$${JSC_BACKEND_PORT}"
+        printf 'API docs: http://localhost:%s/docs\n\n' "$${JSC_BACKEND_PORT}"
+    environment:
+      JSC_FRONTEND_PORT: "${JSC_FRONTEND_PORT:-8080}"
+      JSC_BACKEND_PORT: "${JSC_BACKEND_PORT:-8001}"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+
+volumes:
+  jsc-data:
+
+secrets:
+  backend_env:
+    file: ./.env
